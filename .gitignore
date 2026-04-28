@@ -1,0 +1,4 @@
+credentials/
+s3_inputs/
+__pycache__/
+*.pyc
