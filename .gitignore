@@ -1,4 +1,8 @@
-credentials/
+# Ignore secret JSON profiles; keep credentials/<cloud>/README.md in git
+credentials/**/*.json
 s3_inputs/
 __pycache__/
 *.pyc
+
+# Generated Excel reports (default CLI / Spark output)
+report/

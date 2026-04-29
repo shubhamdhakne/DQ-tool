@@ -2,8 +2,8 @@
 Optional PySpark data quality profile → Pandas summary → same Excel pipeline.
 
 Install: pip install pyspark
-Run: spark-submit dq_tool/spark_profiler.py <path_or_table> --output report.xlsx
-   or: python -m dq_tool.spark_profiler <path> -o report.xlsx
+Run: spark-submit dq_tool/spark_profiler.py <path_or_table> -o report.xlsx
+   or: python -m dq_tool.spark_profiler <path>   (default: report/spark_dq_report.xlsx)
 
 For local files, path should be CSV/Parquet/JSON (Spark read).
 """
@@ -31,6 +31,7 @@ import pandas as pd
 
 from dq_tool.excel_export import profile_to_excel
 from dq_tool.profiler import DatasetProfile, ColumnProfile
+from dq_tool.report_paths import default_report_file
 
 
 def _spark_type_name(dt) -> str:
@@ -143,8 +144,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Spark DQ profile → Excel")
     parser.add_argument("input", help="Path to Parquet/CSV directory or file")
-    parser.add_argument("-o", "--output", default="spark_dq_report.xlsx")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="",
+        help="Output .xlsx (default: report/spark_dq_report.xlsx under repo root)",
+    )
     args = parser.parse_args()
+    out_arg = (args.output or "").strip()
 
     spark = SparkSession.builder.appName("DQTool").getOrCreate()
     path = args.input
@@ -159,9 +166,10 @@ def main() -> None:
         sdf = spark.read.parquet(path)
 
     sample_pdf, prof = profile_spark_dataframe(sdf, source_path=str(p))
-    profile_to_excel(prof, sample_pdf, args.output, sample_rows=min(50, len(sample_pdf)))
+    out_path = Path(out_arg) if out_arg else default_report_file("spark_dq_report.xlsx")
+    profile_to_excel(prof, sample_pdf, out_path, sample_rows=min(50, len(sample_pdf)))
     spark.stop()
-    print(f"Report written: {Path(args.output).resolve()}")
+    print(f"Report written: {out_path.resolve()}")
 
 
 if __name__ == "__main__":
