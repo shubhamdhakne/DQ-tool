@@ -91,6 +91,20 @@ class ColumnProfile:
     memory_bytes: int
 
     def as_dict(self) -> dict[str, Any]:
+        nn = self.non_null_count
+        uniq_ratio = (self.unique_count / nn) if nn > 0 else 0.0
+        flags: list[str] = []
+        if self.null_pct >= 90:
+            flags.append("SEVERE_NULL")
+        elif self.null_pct >= 50:
+            flags.append("HIGH_NULL")
+        elif self.null_pct >= 20:
+            flags.append("ELEVATED_NULL")
+        if nn > 20 and uniq_ratio < 0.05:
+            flags.append("LOW_UNIQUENESS")
+        if nn > 0 and self.unique_count == 1:
+            flags.append("CONSTANT_VALUE")
+        dq_flags = "; ".join(flags) if flags else ""
         return {
             "column": self.name,
             "dtype": self.dtype,
@@ -98,9 +112,11 @@ class ColumnProfile:
             "null_count": self.null_count,
             "null_pct": round(self.null_pct, 4),
             "unique_count": self.unique_count,
+            "uniqueness_ratio": round(uniq_ratio, 6),
             "min": self.min_value,
             "max": self.max_value,
             "memory_bytes": self.memory_bytes,
+            "dq_flags": dq_flags,
         }
 
 

@@ -26,7 +26,7 @@ pip install -r requirements.txt
 python -m dq_tool path\to\data.csv -o report.xlsx
 ```
 
-Default output: `<input_stem>_dq_report.xlsx` next to the input file.
+If you omit `-o`, reports are written under the repo’s **`report/`** folder (created automatically), e.g. `report/<input_stem>_dq_report.xlsx`.
 
 ### Multiple files (mixed CSV/JSON/Parquet)
 
@@ -51,7 +51,7 @@ For multiple files:
 python -m dq_tool folder_csv folder_json folder_parquet --open-dashboard
 ```
 
-This creates a combined `dq_batch_report.xlsx` and opens it directly in dashboard.
+This creates a combined `report/dq_batch_report.xlsx` (default) and opens it directly in dashboard.
 
 Privacy mode example:
 
@@ -89,6 +89,20 @@ Credential storage behavior:
 - Separate folders per cloud (`aws`, `azure`, `snowflake`)
 - Profiles are editable for adding/updating other accounts
 
+**AWS and Azure use the same pattern** (only JSON field names differ):
+
+| Cloud    | Folder              | Example file              | Fields |
+|----------|---------------------|---------------------------|--------|
+| AWS      | `credentials/aws/`  | `credentials/aws/default.json` | `access_key_id`, `secret_access_key`, `region`, `session_token` (optional) |
+| Azure    | `credentials/azure/` | `credentials/azure/default.json` | `connection_string` |
+
+Committed templates you can copy (then fill secrets locally):
+
+- `examples/credentials/aws.default.json.example`
+- `examples/credentials/azure.default.json.example`
+
+Or use the dashboard **Save profile** — it writes to the same paths as AWS.
+
 ### AWS S3 pipeline (no copy under project)
 
 Objects are downloaded only to the **system temp** folder while profiling, then removed. Output is the Excel report (and optional dashboard).
@@ -98,15 +112,40 @@ pip install -r requirements-cloud.txt
 python -m dq_tool --s3-bucket YOUR_BUCKET --s3-prefix optional/prefix/ --aws-profile default -o s3_dq_report.xlsx --hide-paths --open-dashboard
 ```
 
+**All buckets in the account** (same optional prefix applied in each bucket; needs `s3:ListAllMyBuckets` and list/read per bucket):
+
+```bash
+python -m dq_tool --s3-all-buckets --s3-prefix data/incoming/ --aws-profile default
+```
+
+- **`--s3-max-objects`** — cap total objects across all buckets (default **2000**). Use **`0`** for no limit (can be slow or hit API limits on huge accounts).
+- Default report if `-o` omitted: `report/s3_all_buckets_dq_batch_report.xlsx`
+
 - `--aws-profile` reads `credentials/aws/<PROFILE>.json`
-- Default report path if `-o` omitted: `s3_dq_batch_report.xlsx` in the current directory
+- Single-bucket default if `-o` omitted: `report/s3_dq_batch_report.xlsx` (under the repo root)
+
+### Azure Blob pipeline (profile e.g. `azure_account_2`)
+
+Uses `credentials/azure/<PROFILE>.json` (`connection_string`). Blobs are downloaded only to **system temp**, then removed — same idea as S3.
+
+```bash
+pip install -r requirements-cloud.txt
+# Container name is NOT the storage account name — list containers first:
+python -m dq_tool --azure-list-containers --azure-profile azure_account_2
+python -m dq_tool --azure-container YOUR_CONTAINER --azure-profile azure_account_2 --azure-blob-prefix optional/prefix/ -o azure_dq_report.xlsx --hide-paths --open-dashboard
+```
+
+- **`--azure-profile`** — file name without `.json` under `credentials/azure/` (e.g. `azure_account_2` → `azure_account_2.json`)
+- **Dashboard:** Cloud connections → Azure → **Saved profiles** → `azure_account_2` → **Load profile** → **Test connection** (checks storage only; DQ run is via CLI above)
+
+Default report if `-o` omitted: `report/azure_dq_batch_report.xlsx` (under the repo root).
 
 ### Excel sheets
 
 - **Overview** — dataset summary  
 - **Column_Details** — per-column metrics  
 - **Dtype_Summary** — count of columns per dtype  
-- **Sample_Data** — first N rows  
+- **Sample_Data** — first N rows per source. Single-file reports use a **wide** table. **Batch** (multi-file / S3 / Azure) uses a **long tidy** layout: `table_name`, `source_path`, `sample_row`, `column_name`, `cell_value`, so different column sets do not produce one sparse, misaligned sheet.  
 
 ## PySpark (optional)
 
@@ -115,14 +154,16 @@ pip install pyspark
 python -m dq_tool.spark_profiler path\to\folder_or_file.parquet -o spark_report.xlsx
 ```
 
-Uses Spark aggregations (multiple passes); sample rows in the report are limited for cost control.
+If you omit `-o`, output defaults to `report/spark_dq_report.xlsx`. Uses Spark aggregations (multiple passes); sample rows in the report are limited for cost control.
 
 ## Package layout
 
 - `dq_tool/profiler.py` — load + pandas profile  
+- `dq_tool/report_paths.py` — default `report/` output directory under repo root  
 - `dq_tool/excel_export.py` — Excel writer  
 - `dq_tool/spark_profiler.py` — PySpark profile + Excel  
 - `dq_tool/connections.py` — credential storage + cloud connection tests  
 - `dq_tool/s3_batch.py` — S3 list + temp download (no project copy)  
+- `dq_tool/azure_batch.py` — Azure Blob list + temp download (no project copy)  
 - `dashboard/app.py` — Streamlit UI  
 
