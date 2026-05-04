@@ -135,7 +135,7 @@ python -m dq_tool --s3-all-buckets --s3-prefix data/incoming/ --aws-profile defa
 - `--aws-profile` reads `credentials/aws/<PROFILE>.json`
 - Single-bucket default if `-o` omitted: `report/s3_dq_batch_report.xlsx` (under the repo root)
 
-his### Azure Blob pipeline (profile e.g. `azure_account_2`)
+### Azure Blob pipeline (profile e.g. `azure_account_2`)
 
 Uses `credentials/azure/<PROFILE>.json` (`connection_string`). Blobs are downloaded only to **system temp**, then removed — same idea as S3.
 
