@@ -27,8 +27,6 @@ try:
 except ImportError:
     SparkSession = None  # type: ignore[misc, assignment]
 
-import pandas as pd
-
 from dq_tool.excel_export import profile_to_excel
 from dq_tool.profiler import DatasetProfile, ColumnProfile
 from dq_tool.report_paths import default_report_file
@@ -38,8 +36,8 @@ def _spark_type_name(dt) -> str:
     return dt.simpleString()
 
 
-def profile_spark_dataframe(df, source_path: str | None = None) -> tuple[pd.DataFrame, DatasetProfile]:
-    """Build DatasetProfile from a Spark DataFrame (collects column stats only, not full data)."""
+def profile_spark_dataframe(df, source_path: str | None = None) -> DatasetProfile:
+    """Build DatasetProfile from a Spark DataFrame (aggregates over full data; does not collect all rows)."""
     if SparkSession is None:
         raise RuntimeError("pyspark is not installed. pip install pyspark")
 
@@ -107,6 +105,10 @@ def profile_spark_dataframe(df, source_path: str | None = None) -> tuple[pd.Data
             )
         )
 
+    empty_column_count = (
+        sum(1 for c in column_profiles if c.non_null_count == 0) if row_count > 0 else 0
+    )
+
     file_size = None
     ext = ""
     ftype = "Spark"
@@ -124,6 +126,7 @@ def profile_spark_dataframe(df, source_path: str | None = None) -> tuple[pd.Data
         file_size_bytes=file_size,
         row_count=row_count,
         column_count=column_count,
+        empty_column_count=empty_column_count,
         total_cells=total_cells,
         total_nulls=total_nulls,
         overall_null_pct=overall_null_pct,
@@ -132,9 +135,7 @@ def profile_spark_dataframe(df, source_path: str | None = None) -> tuple[pd.Data
         columns=column_profiles,
     )
 
-    # Small sample for Excel / inspection (limit cost)
-    sample_pdf = df.limit(50).toPandas()
-    return sample_pdf, prof
+    return prof
 
 
 def main() -> None:
@@ -148,7 +149,7 @@ def main() -> None:
         "-o",
         "--output",
         default="",
-        help="Output .xlsx (default: report/spark_dq_report.xlsx under repo root)",
+        help="Output .xlsx (default: report/spark_dq_report_<UTC_timestamp>.xlsx under repo root)",
     )
     args = parser.parse_args()
     out_arg = (args.output or "").strip()
@@ -165,9 +166,9 @@ def main() -> None:
     else:
         sdf = spark.read.parquet(path)
 
-    sample_pdf, prof = profile_spark_dataframe(sdf, source_path=str(p))
+    prof = profile_spark_dataframe(sdf, source_path=str(p))
     out_path = Path(out_arg) if out_arg else default_report_file("spark_dq_report.xlsx")
-    profile_to_excel(prof, sample_pdf, out_path, sample_rows=min(50, len(sample_pdf)))
+    profile_to_excel(prof, out_path)
     spark.stop()
     print(f"Report written: {out_path.resolve()}")
 

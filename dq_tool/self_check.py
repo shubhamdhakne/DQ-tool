@@ -46,16 +46,14 @@ def main() -> None:
     out_x = Path(tempfile.gettempdir()) / "dq_self_check_report.xlsx"
     profile_to_excel(
         prof,
-        df,
         out_x,
-        sample_rows=2,
         report_context={"data_source_type": "self_check"},
     )
     sheets = pd.read_excel(out_x, sheet_name=None)
     cd = sheets.get("Column_Details")
-    assert cd is not None and "null_pct" in cd.columns
-    cd2 = _coerce_numeric_columns(cd, "null_pct", "memory_bytes")
-    _ = cd2.nlargest(min(10, len(cd2)), "null_pct")
+    assert cd is not None and "column_null_pct" in cd.columns
+    cd2 = _coerce_numeric_columns(cd, "column_null_pct", "memory_bytes")
+    _ = cd2.nlargest(min(10, len(cd2)), "column_null_pct")
     print(f"xlsx round-trip + nlargest on Column_Details: OK ({len(cd)} rows)")
 
     dtype_df = sheets.get("Dtype_Summary")

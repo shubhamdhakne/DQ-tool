@@ -128,6 +128,7 @@ class DatasetProfile:
     file_size_bytes: int | None
     row_count: int
     column_count: int
+    empty_column_count: int  # columns 100% null when row_count > 0
     total_cells: int
     total_nulls: int
     overall_null_pct: float
@@ -143,6 +144,7 @@ class DatasetProfile:
             "file_size_bytes": self.file_size_bytes,
             "row_count": self.row_count,
             "column_count": self.column_count,
+            "empty_column_count": self.empty_column_count,
             "total_cells": self.total_cells,
             "total_nulls": self.total_nulls,
             "overall_null_pct": round(self.overall_null_pct, 4),
@@ -165,18 +167,37 @@ class DataQualityProfiler:
         row_count = len(df)
         column_count = len(df.columns)
         total_cells = row_count * column_count if column_count else 0
-        null_matrix = df.isna()
-        total_nulls = int(null_matrix.sum().sum())
-        overall_null_pct = (total_nulls / total_cells * 100) if total_cells else 0.0
 
         mem = int(df.memory_usage(deep=True).sum())
         dtype_counts = df.dtypes.astype(str).value_counts().to_dict()
         dtypes_json = json.dumps(dtype_counts, indent=2)
 
-        file_size = None
+        file_size: int | None = None
         ext = ""
         ftype = "In-memory"
-        if path:
+        path_str = (path or "").strip()
+        # Logical URIs (Fabric, S3, Azure labels) are not filesystem paths — Path() gives wrong suffix / no size.
+        if path_str and "://" in path_str:
+            scheme, _, rest = path_str.partition("://")
+            scheme = scheme.lower()
+            if scheme == "fabric":
+                ftype = "Fabric SQL"
+                ext = "sql"
+            elif scheme == "s3":
+                ftype = "S3"
+                key = rest.split("/", 1)[-1] if "/" in rest else rest
+                ext = _file_extension(Path(key)) if key else ""
+            elif scheme == "azure":
+                ftype = "Azure Blob"
+                parts = rest.split("/", 2)
+                key = parts[2] if len(parts) > 2 else ""
+                ext = _file_extension(Path(key)) if key else ""
+            else:
+                ftype = f"{scheme.upper()} (URI)"
+                ext = scheme
+            # No on-disk file: use in-memory footprint so Files_Overview size / human columns populate.
+            file_size = int(mem)
+        elif path_str:
             p = Path(path)
             ext = _file_extension(p)
             ftype = _detect_file_type(p)
@@ -184,9 +205,11 @@ class DataQualityProfiler:
                 file_size = p.stat().st_size
 
         columns: list[ColumnProfile] = []
+        total_nulls = 0
         for col in df.columns:
             s = df[col]
             null_count = int(s.isna().sum())
+            total_nulls += null_count
             non_null = row_count - null_count
             null_pct = (null_count / row_count * 100) if row_count else 0.0
             nunique = int(s.nunique(dropna=True))
@@ -206,6 +229,12 @@ class DataQualityProfiler:
                 )
             )
 
+        overall_null_pct = (total_nulls / total_cells * 100) if total_cells else 0.0
+
+        empty_column_count = (
+            sum(1 for c in columns if c.non_null_count == 0) if row_count > 0 else 0
+        )
+
         return DatasetProfile(
             source_path=path,
             file_type=ftype,
@@ -213,6 +242,7 @@ class DataQualityProfiler:
             file_size_bytes=file_size,
             row_count=row_count,
             column_count=column_count,
+            empty_column_count=empty_column_count,
             total_cells=total_cells,
             total_nulls=total_nulls,
             overall_null_pct=overall_null_pct,

@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from dq_tool.excel_export import (
-    build_batch_sample_data_long,
+    append_profile_to_batch,
     logical_table_name,
     profile_to_excel,
     redact_source_uri,
@@ -93,10 +93,62 @@ def _folder_diversity_count(source_labels: list[str]) -> int:
     return len(folders)
 
 
+def _finalize_batch_workbook(
+    summaries: list[dict[str, object]],
+    all_columns: list[dict[str, object]],
+    all_dtypes: list[dict[str, object]],
+    output: Path,
+    *,
+    hide_paths: bool,
+    skipped_count: int,
+    report_context: dict[str, object] | None,
+) -> Path:
+    if not summaries:
+        raise RuntimeError("No readable files found to profile.")
+
+    if skipped_count:
+        print(f"Files skipped: {skipped_count}")
+
+    labels_for_folders = [str(s.get("source_path") or "") for s in summaries]
+    total_fs = 0
+    for s in summaries:
+        b = s.get("file_size_bytes")
+        try:
+            if b is not None:
+                total_fs += int(b)
+        except (TypeError, ValueError):
+            pass
+    total_mem = 0
+    for s in summaries:
+        b = s.get("memory_usage_bytes")
+        try:
+            if b is not None:
+                total_mem += int(b)
+        except (TypeError, ValueError):
+            pass
+
+    rc: dict[str, object] = dict(report_context or {})
+    rc.setdefault("data_source_type", "Local files / folders")
+    rc["files_profiled_ok"] = len(summaries)
+    rc["files_skipped"] = skipped_count
+    rc["paths_hidden"] = hide_paths
+    rc["distinct_folder_count"] = _folder_diversity_count(labels_for_folders)
+    rc["total_file_size_bytes"] = total_fs
+    rc["total_memory_usage_bytes"] = total_mem
+
+    write_batch_workbook(
+        summaries,
+        all_columns,
+        all_dtypes,
+        output,
+        rc,
+    )
+    return output
+
+
 def _write_batch_report(
     files: list[Path],
     output: Path,
-    sample_rows: int,
     hide_paths: bool,
     source_labels: list[str] | None = None,
     report_context: dict[str, object] | None = None,
@@ -104,7 +156,6 @@ def _write_batch_report(
     summaries: list[dict[str, object]] = []
     all_columns: list[dict[str, object]] = []
     all_dtypes: list[dict[str, object]] = []
-    all_samples: list[pd.DataFrame] = []
     success_count = 0
     skipped_count = 0
 
@@ -132,81 +183,24 @@ def _write_batch_report(
         if not table_name:
             table_name = f"dataset_{success_count}"
 
-        summary = prof.summary_dict()
-        summary["source_path"] = display_source
-        summary["table_name"] = table_name
-        summaries.append(summary)
+        append_profile_to_batch(
+            prof,
+            display_source=display_source,
+            table_name=table_name,
+            summaries=summaries,
+            all_column_rows=all_columns,
+            all_dtype_rows=all_dtypes,
+        )
 
-        for col in prof.columns:
-            row = col.as_dict()
-            row["source_path"] = display_source
-            row["table_name"] = table_name
-            all_columns.append(row)
-
-        dtype_counts = json.loads(prof.dtypes_json)
-        for dtype, count in dtype_counts.items():
-            all_dtypes.append(
-                {
-                    "source_path": display_source,
-                    "table_name": table_name,
-                    "dtype": dtype,
-                    "count": int(count),
-                }
-            )
-
-        if sample_rows > 0:
-            sample = df.head(sample_rows).copy()
-            source_value = display_source
-            sample_source_col = "__dq_source_path"
-            if sample_source_col in sample.columns:
-                sample_source_col = "__dq_source_file"
-            sample.insert(0, sample_source_col, source_value)
-            sample.insert(1, "__dq_table_name", table_name)
-            all_samples.append(sample)
-
-    if success_count == 0:
-        raise RuntimeError("No readable files found to profile.")
-
-    if skipped_count:
-        print(f"Files skipped: {skipped_count}")
-
-    labels_for_folders = [str(s.get("source_path") or "") for s in summaries]
-    total_fs = 0
-    for s in summaries:
-        b = s.get("file_size_bytes")
-        try:
-            if b is not None:
-                total_fs += int(b)
-        except (TypeError, ValueError):
-            pass
-    total_mem = 0
-    for s in summaries:
-        b = s.get("memory_usage_bytes")
-        try:
-            if b is not None:
-                total_mem += int(b)
-        except (TypeError, ValueError):
-            pass
-
-    rc: dict[str, object] = dict(report_context or {})
-    rc.setdefault("data_source_type", "Local files / folders")
-    rc["files_profiled_ok"] = success_count
-    rc["files_skipped"] = skipped_count
-    rc["paths_hidden"] = hide_paths
-    rc["distinct_folder_count"] = _folder_diversity_count(labels_for_folders)
-    rc["total_file_size_bytes"] = total_fs
-    rc["total_memory_usage_bytes"] = total_mem
-
-    samples_sheet = build_batch_sample_data_long(all_samples) if all_samples else None
-    write_batch_workbook(
+    return _finalize_batch_workbook(
         summaries,
         all_columns,
         all_dtypes,
-        samples_sheet,
         output,
-        rc,
+        hide_paths=hide_paths,
+        skipped_count=skipped_count,
+        report_context=report_context,
     )
-    return output
 
 
 def _run_s3_pipeline(
@@ -214,7 +208,6 @@ def _run_s3_pipeline(
     prefix: str,
     aws_profile: str,
     output: Path,
-    sample_rows: int,
     hide_paths: bool,
 ) -> Path:
     """Download S3 objects only to OS temp, profile, write Excel, delete temps."""
@@ -249,7 +242,6 @@ def _run_s3_pipeline(
         _write_batch_report(
             temp_paths,
             output,
-            sample_rows,
             hide_paths,
             source_labels=labels,
             report_context={
@@ -272,7 +264,6 @@ def _run_s3_all_buckets_pipeline(
     prefix: str,
     aws_profile: str,
     output: Path,
-    sample_rows: int,
     hide_paths: bool,
     max_objects: int | None,
 ) -> Path:
@@ -335,7 +326,6 @@ def _run_s3_all_buckets_pipeline(
         _write_batch_report(
             temp_paths,
             output,
-            sample_rows,
             hide_paths,
             source_labels=labels,
             report_context={
@@ -393,7 +383,6 @@ def _run_azure_pipeline(
     blob_prefix: str,
     azure_profile: str,
     output: Path,
-    sample_rows: int,
     hide_paths: bool,
 ) -> Path:
     """Download Azure blobs only to OS temp, profile, write Excel, delete temps."""
@@ -440,7 +429,6 @@ def _run_azure_pipeline(
         _write_batch_report(
             temp_paths,
             output,
-            sample_rows,
             hide_paths,
             source_labels=labels,
             report_context={
@@ -523,13 +511,44 @@ def main() -> None:
         help="List blob container names for this profile, then exit (use to pick --azure-container).",
     )
     parser.add_argument(
+        "--fabric-profile",
+        default="",
+        metavar="PROFILE",
+        help="Microsoft Fabric SQL: credential JSON under credentials/fabric/<PROFILE>.json; profiles all BASE TABLE in --fabric-schema.",
+    )
+    parser.add_argument(
+        "--fabric-schema",
+        default="BRONZE",
+        metavar="NAME",
+        help="SQL schema to scan (default BRONZE). Only letters, digits, underscore.",
+    )
+    parser.add_argument(
+        "--fabric-database",
+        default="",
+        metavar="NAME",
+        help="Fabric SQL database / Initial Catalog when not set (or incomplete) in the profile JSON.",
+    )
+    parser.add_argument(
+        "--fabric-max-rows",
+        type=int,
+        default=50_000,
+        metavar="N",
+        help="Max rows per table via SELECT TOP (default 50000).",
+    )
+    parser.add_argument(
+        "--fabric-max-tables",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Max tables to profile (default 0 = all tables in schema).",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=str,
         default="",
-        help="Output .xlsx path (default: all under repo report/ — single=report/<stem>_dq_report.xlsx, multi=report/dq_batch_report.xlsx, S3/Azure=report/..._batch_report.xlsx)",
+        help="Output .xlsx path (default: under repo report/ with UTC timestamp in the filename so runs do not overwrite)",
     )
-    parser.add_argument("--sample-rows", type=int, default=10, help="Rows in Sample_Data sheet")
     parser.add_argument(
         "--open-dashboard",
         action="store_true",
@@ -543,16 +562,31 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.azure_list_containers:
-        if args.input or args.s3_bucket or args.s3_all_buckets or args.azure_container or args.open_dashboard:
+        if (
+            args.input
+            or args.s3_bucket
+            or args.s3_all_buckets
+            or args.azure_container
+            or args.open_dashboard
+            or args.fabric_profile
+        ):
             parser.error(
                 "--azure-list-containers: use only with --azure-profile (no paths, --open-dashboard, or other cloud flags)."
             )
         _azure_list_containers(args.azure_profile.strip())
         return
 
-    cloud_modes = (1 if args.s3_bucket else 0) + (1 if args.azure_container else 0) + (1 if args.s3_all_buckets else 0)
+    fabric_on = bool(args.fabric_profile and args.fabric_profile.strip())
+    cloud_modes = (
+        (1 if args.s3_bucket else 0)
+        + (1 if args.azure_container else 0)
+        + (1 if args.s3_all_buckets else 0)
+        + (1 if fabric_on else 0)
+    )
     if cloud_modes > 1:
-        parser.error("Use only one of --s3-bucket, --s3-all-buckets, or --azure-container.")
+        parser.error(
+            "Use only one of --s3-bucket, --s3-all-buckets, --azure-container, or --fabric-profile."
+        )
 
     if args.s3_all_buckets:
         if args.input:
@@ -563,7 +597,6 @@ def main() -> None:
             args.s3_prefix.strip(),
             args.aws_profile.strip(),
             out,
-            sample_rows=args.sample_rows,
             hide_paths=args.hide_paths,
             max_objects=max_obs,
         )
@@ -577,7 +610,6 @@ def main() -> None:
             args.s3_prefix.strip(),
             args.aws_profile.strip(),
             out,
-            sample_rows=args.sample_rows,
             hide_paths=args.hide_paths,
         )
         print(f"S3 batch report written: {out.resolve()}")
@@ -590,10 +622,32 @@ def main() -> None:
             args.azure_blob_prefix.strip(),
             args.azure_profile.strip(),
             out,
-            sample_rows=args.sample_rows,
             hide_paths=args.hide_paths,
         )
         print(f"Azure batch report written: {out.resolve()}")
+    elif fabric_on:
+        if args.input:
+            parser.error("Do not pass local paths together with --fabric-profile.")
+        from dq_tool.fabric_pipeline import run_fabric_schema_pipeline
+
+        schema_slug = "".join(
+            ch if ch.isalnum() else "_" for ch in args.fabric_schema.strip().lower()
+        ).strip("_")[:48] or "schema"
+        out = (
+            Path(args.output)
+            if args.output
+            else default_report_file(f"fabric_{schema_slug}_dq_batch_report.xlsx")
+        )
+        run_fabric_schema_pipeline(
+            args.fabric_profile.strip(),
+            out,
+            schema=args.fabric_schema.strip(),
+            database=args.fabric_database.strip(),
+            hide_paths=args.hide_paths,
+            max_rows_per_table=int(args.fabric_max_rows),
+            max_tables=int(args.fabric_max_tables),
+        )
+        print(f"Fabric SQL batch report written: {out.resolve()}")
     elif args.input:
         files = _collect_input_files(args.input, recursive=True)
         if not files:
@@ -614,9 +668,7 @@ def main() -> None:
                 rctx["input_path"] = canonical
             profile_to_excel(
                 prof,
-                df,
                 out,
-                sample_rows=args.sample_rows,
                 report_context=rctx,
                 display_source_override=redact_source_uri(canonical) if args.hide_paths else None,
                 canonical_source_for_table_name=canonical,
@@ -627,14 +679,15 @@ def main() -> None:
             _write_batch_report(
                 files,
                 out,
-                sample_rows=args.sample_rows,
                 hide_paths=args.hide_paths,
                 report_context={"data_source_type": "Local files / folders"},
             )
             print(f"Batch report written: {out.resolve()}")
             print(f"Total files profiled: {len(files)}")
     else:
-        parser.error("Provide file/folder paths, --s3-bucket, --s3-all-buckets, or --azure-container.")
+        parser.error(
+            "Provide file/folder paths, --s3-bucket, --s3-all-buckets, --azure-container, or --fabric-profile."
+        )
 
     if args.open_dashboard:
         dashboard_app = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
@@ -666,6 +719,15 @@ def main() -> None:
                     "container": args.azure_container.strip(),
                     "prefix": args.azure_blob_prefix.strip(),
                     "profile": args.azure_profile.strip(),
+                }
+            )
+        elif fabric_on:
+            hint.update(
+                {
+                    "cloud": "Microsoft Fabric SQL",
+                    "fabric_profile": args.fabric_profile.strip(),
+                    "fabric_schema": args.fabric_schema.strip(),
+                    "fabric_database": (args.fabric_database or "").strip(),
                 }
             )
         else:

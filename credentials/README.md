@@ -7,6 +7,7 @@ All cloud profiles live **inside the DQ-tool project** under this folder, **one 
 | **AWS**    | `credentials/aws/` | `credentials/aws/default.json`       | `access_key_id`, `secret_access_key`, `region`, `session_token` (optional) |
 | **Azure**  | `credentials/azure/` | `credentials/azure/default.json` | `connection_string` |
 | **Snowflake** | `credentials/snowflake/` | `credentials/snowflake/default.json` | `account`, `user`, `password`, `warehouse`, `database`, `schema`, `role` (optional) |
+| **Fabric** (SQL) | `credentials/fabric/` | `credentials/fabric/default.json` | `authentication`, `sql_connection_string` (required); optional `server`, `database`, `driver` if not fully parseable — see `credentials/fabric/README.md` |
 
 - **Profile name** = file name without `.json` (e.g. profile `prod` → `prod.json`).
 - **`*.json` files are gitignored** so secrets are not pushed to GitHub.
