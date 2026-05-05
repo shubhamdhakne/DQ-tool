@@ -67,11 +67,11 @@ python -m streamlit run dashboard/app.py
 
 Upload CSV / Excel / Parquet / JSON or enter a **local file path**. Download the multi-sheet Excel report from the page.
 
-### Cloud connections (AWS / Azure / Snowflake)
+### Cloud connections (AWS / Azure / Snowflake / Fabric SQL)
 
 The dashboard sidebar now includes a **Cloud connections** panel where you can:
 
-- Choose provider: AWS, Azure Blob, or Snowflake
+- Choose provider: AWS, Azure Blob, Snowflake, or **Microsoft Fabric** (SQL endpoint / warehouse)
 - Enter credentials and **Save profile**
 - **Load profile** later from saved profile files
 - **Test connection** before using it in pipelines
@@ -86,7 +86,7 @@ pip install -r requirements-cloud.txt
 Credential storage behavior:
 
 - Stored in project folder: `credentials/<cloud>/<profile>.json`
-- Separate folders per cloud (`aws`, `azure`, `snowflake`)
+- Separate folders per cloud (`aws`, `azure`, `snowflake`, `fabric`)
 - Profiles are editable for adding/updating other accounts
 
 **AWS and Azure use the same pattern** (only JSON field names differ):
@@ -95,13 +95,24 @@ Credential storage behavior:
 |----------|---------------------|---------------------------|--------|
 | AWS      | `credentials/aws/`  | `credentials/aws/default.json` | `access_key_id`, `secret_access_key`, `region`, `session_token` (optional) |
 | Azure    | `credentials/azure/` | `credentials/azure/default.json` | `connection_string` |
+| Fabric (SQL) | `credentials/fabric/` | `credentials/fabric/default.json` | `authentication`, `sql_connection_string` — see `credentials/fabric/README.md` |
 
-Committed templates you can copy (then fill secrets locally):
+All secret profiles live only under **`credentials/`** (JSON is gitignored). Use the dashboard **Save profile** or create files next to each cloud’s `README.md` there.
 
-- `examples/credentials/aws.default.json.example`
-- `examples/credentials/azure.default.json.example`
+**Fabric SQL** needs [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (or 17) on the machine, plus `pip install pyodbc` (included in `requirements-cloud.txt`). Paste the full SQL connection string from Fabric into `sql_connection_string`. See `credentials/fabric/README.md`.
 
 Or use the dashboard **Save profile** — it writes to the same paths as AWS.
+
+### Microsoft Fabric SQL (all tables in a schema, e.g. BRONZE)
+
+Uses `credentials/fabric/<profile>.json` (same fields as the dashboard). Profiles each **base table** in the schema with `SELECT TOP (n) *` (default 50k rows per table), writes one batch Excel under `report/`, optional dashboard.
+
+```bash
+pip install -r requirements-cloud.txt
+python -m dq_tool --fabric-profile fabric --fabric-database YOUR_SQL_DATABASE_NAME --fabric-schema BRONZE --hide-paths --open-dashboard
+```
+
+`YOUR_SQL_DATABASE_NAME` is the **Initial Catalog** from Fabric (same as a `"database"` field in the profile JSON). Omit `--fabric-schema` to keep the default **`BRONZE`**. Use `--fabric-max-tables 10` for a quick subset.
 
 ### AWS S3 pipeline (no copy under project)
 

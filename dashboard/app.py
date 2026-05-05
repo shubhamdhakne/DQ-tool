@@ -15,8 +15,9 @@ import pandas as pd
 import streamlit as st
 
 from dq_tool.connections import credentials_root, list_profiles, load_profile, save_profile, test_connection
-from dq_tool.excel_export import format_bytes, profile_to_excel
+from dq_tool.excel_export import format_bytes, profile_to_excel, reorder_column_details_df
 from dq_tool.profiler import load_dataframe, profile_dataframe
+from dq_tool.report_paths import unique_report_basename
 
 try:
     import altair as alt
@@ -135,6 +136,32 @@ def _reload_all_column_details_raw(path: str | None, data: bytes | None) -> pd.D
         return None
 
 
+def _details_col_name_and_null_pct(df: pd.DataFrame | None) -> tuple[str, str]:
+    """New Excel uses column_name / column_null_pct; older reports use column / null_pct."""
+    if df is None or df.empty:
+        return "column", "null_pct"
+    c = "column_name" if "column_name" in df.columns else "column"
+    n = "column_null_pct" if "column_null_pct" in df.columns else "null_pct"
+    return c, n
+
+
+def _files_over_null_column(df: pd.DataFrame | None) -> str | None:
+    if df is None or df.empty:
+        return None
+    if "total_null_cells" in df.columns:
+        return "total_null_cells"
+    if "total_nulls" in df.columns:
+        return "total_nulls"
+    return None
+
+
+def _overview_metric(metrics: dict[str, object], *keys: str, default: object = 0) -> object:
+    for k in keys:
+        if k in metrics and metrics[k] is not None and str(metrics[k]).strip() != "":
+            return metrics[k]
+    return default
+
+
 def _coerce_numeric_columns(df: pd.DataFrame, *column_names: str) -> pd.DataFrame:
     """Excel and mixed exports often load metrics as object; nlargest needs numeric dtypes."""
     if df is None or df.empty:
@@ -195,11 +222,56 @@ def _cloud_fields(provider: str) -> list[tuple[str, str, bool]]:
     ]
 
 
+def _fabric_auth_only_fields(auth: str) -> list[tuple[str, str, bool]]:
+    """Fabric: SQL string + optional overrides; only auth-specific rows here."""
+    a = (auth or "interactive").lower()
+    if a == "password":
+        return [
+            ("user", "User UPN", False),
+            ("password", "Password", True),
+        ]
+    if a == "service_principal":
+        return [
+            ("tenant_id", "Directory (tenant) ID", False),
+            ("client_id", "Application (client) ID", False),
+            ("client_secret", "Client secret", True),
+        ]
+    return []
+
+
 def _render_connections_panel() -> None:
     st.markdown("---")
     st.subheader("Cloud connections")
-    provider_label = st.selectbox("Provider", ["AWS", "Azure", "Snowflake"], key="conn_provider")
+    provider_label = st.selectbox(
+        "Provider", ["AWS", "Azure", "Snowflake", "Fabric"], key="conn_provider"
+    )
     provider_key = provider_label.lower()
+
+    fabric_auth = "interactive"
+    if provider_key == "fabric":
+        _fabric_auth_labels = {
+            "interactive": "Microsoft Entra ID — interactive (sign-in prompt)",
+            "password": "Microsoft Entra ID — username + password",
+            "service_principal": "Service principal (app registration)",
+        }
+        fabric_auth = st.selectbox(
+            "Fabric authentication",
+            options=list(_fabric_auth_labels.keys()),
+            format_func=lambda k: _fabric_auth_labels[k],
+            key="conn_fabric_auth_kind",
+        )
+        if "fabric_sql_connection_string" not in st.session_state:
+            st.session_state["fabric_sql_connection_string"] = ""
+        st.text_area(
+            "SQL connection string (from Fabric — stored in credentials/fabric only)",
+            key="fabric_sql_connection_string",
+            height=100,
+            placeholder="Data Source=....datawarehouse.fabric.microsoft.com;Initial Catalog=YourLakehouse;...",
+        )
+        fields: list[tuple[str, str, bool]] = []
+    else:
+        fields = _cloud_fields(provider_label)
+
     existing_profiles = list_profiles(provider_key)
     selected_existing = st.selectbox(
         "Saved profiles",
@@ -212,16 +284,43 @@ def _render_connections_panel() -> None:
         st.session_state["conn_profile_name"] = "default"
     profile_name = st.text_input("Profile name", key="conn_profile_name")
 
-    fields = _cloud_fields(provider_label)
     creds: dict[str, str] = {}
-    for field_key, label, is_secret in fields:
-        state_key = f"{provider_key}_{field_key}"
-        creds[field_key] = st.text_input(
-            label,
-            value=st.session_state.get(state_key, ""),
-            type="password" if is_secret else "default",
-            key=state_key,
-        )
+    if provider_key == "fabric":
+        with st.expander("Optional overrides (server / database / ODBC driver)", expanded=False):
+            st.text_input(
+                "Server host (only if missing from the SQL string)",
+                key="fabric_server",
+            )
+            st.text_input(
+                "Database / Initial Catalog (only if missing from the SQL string)",
+                key="fabric_database",
+            )
+            st.text_input(
+                "ODBC driver (blank = ODBC Driver 18 for SQL Server)",
+                key="fabric_driver",
+            )
+        for field_key, label, is_secret in _fabric_auth_only_fields(fabric_auth):
+            state_key = f"fabric_{field_key}"
+            creds[field_key] = st.text_input(
+                label,
+                value=st.session_state.get(state_key, ""),
+                type="password" if is_secret else "default",
+                key=state_key,
+            )
+        creds["authentication"] = fabric_auth
+        creds["sql_connection_string"] = st.session_state.get("fabric_sql_connection_string", "") or ""
+        creds["server"] = st.session_state.get("fabric_server", "") or ""
+        creds["database"] = st.session_state.get("fabric_database", "") or ""
+        creds["driver"] = st.session_state.get("fabric_driver", "") or ""
+    else:
+        for field_key, label, is_secret in fields:
+            state_key = f"{provider_key}_{field_key}"
+            creds[field_key] = st.text_input(
+                label,
+                value=st.session_state.get(state_key, ""),
+                type="password" if is_secret else "default",
+                key=state_key,
+            )
 
     c1, c2, c3 = st.columns(3)
     if c1.button("Load profile", width="stretch"):
@@ -229,6 +328,11 @@ def _render_connections_panel() -> None:
         if ok:
             for k, v in loaded.items():
                 st.session_state[f"{provider_key}_{k}"] = v
+            if provider_key == "fabric":
+                auth_val = str(loaded.get("authentication", "interactive")).lower()
+                if auth_val not in ("interactive", "password", "service_principal"):
+                    auth_val = "interactive"
+                st.session_state["conn_fabric_auth_kind"] = auth_val
             st.success(msg)
             st.rerun()
         else:
@@ -282,7 +386,6 @@ with st.sidebar:
             value=auto_report_path if auto_report_exists else "",
         )
 
-    sample_rows = st.slider("Sample rows in Excel", 0, 100, 10)
     _render_connections_panel()
 
 
@@ -429,10 +532,15 @@ def _show_existing_report(
             total_rows = int(pd.to_numeric(files_over["row_count"], errors="coerce").fillna(0).sum())
         except (TypeError, ValueError, KeyError):
             total_rows = 0
+        tn_col = _files_over_null_column(files_over)
         try:
-            total_nulls = int(pd.to_numeric(files_over["total_nulls"], errors="coerce").fillna(0).sum())
+            total_nulls = (
+                int(pd.to_numeric(files_over[tn_col], errors="coerce").fillna(0).sum())
+                if tn_col
+                else int(float(_overview_metric(metrics, "total_null_cells", "total_nulls", default=0) or 0))
+            )
         except (TypeError, ValueError, KeyError):
-            total_nulls = int(metrics.get("total_nulls", 0) or 0)
+            total_nulls = int(float(_overview_metric(metrics, "total_null_cells", "total_nulls", default=0) or 0))
         cols_max = int(pd.to_numeric(files_over["column_count"], errors="coerce").max() or 0)
         total_cells = 0
         try:
@@ -442,23 +550,36 @@ def _show_existing_report(
         except (TypeError, ValueError, KeyError):
             total_cells = 0
         onull = (total_nulls / total_cells * 100) if total_cells else 0.0
-        m1, m2, m3, m4, m5 = st.columns(5)
+        try:
+            empty_sum = (
+                int(pd.to_numeric(files_over["empty_column_count"], errors="coerce").fillna(0).sum())
+                if "empty_column_count" in files_over.columns
+                else 0
+            )
+        except (TypeError, ValueError, KeyError):
+            empty_sum = 0
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Total rows (all files)", f"{total_rows:,}")
         m2.metric("Max columns (any file)", f"{cols_max:,}")
-        m3.metric("Total nulls (all files)", f"{total_nulls:,}")
-        m4.metric("Weighted null % (cells)", f"{onull:.2f}%")
+        m3.metric("Empty columns (all files)", f"{empty_sum:,}")
+        m4.metric("Total null cells (all files)", f"{total_nulls:,}")
+        m5.metric("Table null % (weighted cells)", f"{onull:.2f}%")
         if "memory_usage_bytes" in files_over.columns:
             tm = int(pd.to_numeric(files_over["memory_usage_bytes"], errors="coerce").fillna(0).sum())
-            m5.metric("Memory sum (deep)", format_bytes(tm))
+            m6.metric("Memory sum (deep)", format_bytes(tm))
         else:
-            m5.metric("Memory (deep)", format_bytes(int(metrics.get("memory_usage_bytes", 0) or 0)))
+            m6.metric("Memory (deep)", format_bytes(int(metrics.get("memory_usage_bytes", 0) or 0)))
     elif metrics:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Rows", f"{int(float(metrics.get('row_count', 0) or 0)):,}")
         c2.metric("Columns", f"{int(float(metrics.get('column_count', 0) or 0)):,}")
-        c3.metric("Total nulls", f"{int(float(metrics.get('total_nulls', 0) or 0)):,}")
-        c4.metric("Null % (all cells)", f"{float(metrics.get('overall_null_pct', 0) or 0):.2f}%")
-        c5.metric("Memory (deep)", format_bytes(int(float(metrics.get("memory_usage_bytes", 0) or 0))))
+        c3.metric(
+            "Empty columns (100% null)",
+            f"{int(float(metrics.get('empty_column_count', 0) or 0)):,}",
+        )
+        c4.metric("Total null cells", f"{int(float(_overview_metric(metrics, 'total_null_cells', 'total_nulls', default=0) or 0)):,}")
+        c5.metric("Table null % (all cells)", f"{float(_overview_metric(metrics, 'table_null_pct', 'overall_null_pct', default=0) or 0):.2f}%")
+        c6.metric("Memory (deep)", format_bytes(int(float(metrics.get("memory_usage_bytes", 0) or 0))))
     else:
         st.info("Open a report generated by this tool (includes Overview or Files_Overview).")
 
@@ -481,24 +602,29 @@ def _show_existing_report(
 
     with tab_columns:
         if col_details is not None and not col_details.empty:
-            st.dataframe(_arrow_safe_df(col_details), width="stretch", hide_index=True)
+            st.dataframe(
+                _arrow_safe_df(reorder_column_details_df(col_details)),
+                width="stretch",
+                hide_index=True,
+            )
         else:
             st.warning("No column details found.")
 
     with tab_charts:
+        ccol, npct = _details_col_name_and_null_pct(col_details)
         cd_num = (
-            _coerce_numeric_columns(col_details, "null_pct", "memory_bytes")
+            _coerce_numeric_columns(col_details, npct, "memory_bytes")
             if col_details is not None and not col_details.empty
             else col_details
         )
-        if cd_num is not None and {"column", "null_pct"}.issubset(cd_num.columns):
-            sub = cd_num.nlargest(min(40, len(cd_num)), "null_pct")[["column", "null_pct"]].copy()
-            _bar_chart(sub, "column", "null_pct", "Top columns by null %", "Column")
-        if cd_num is not None and {"column", "memory_bytes"}.issubset(cd_num.columns):
-            sub2 = cd_num.nlargest(min(25, len(cd_num)), "memory_bytes")[["column", "memory_bytes"]].copy()
+        if cd_num is not None and ccol in cd_num.columns and npct in cd_num.columns:
+            sub = cd_num.nlargest(min(40, len(cd_num)), npct)[[ccol, npct]].copy()
+            _bar_chart(sub, ccol, npct, "Top columns by column null %", "Column")
+        if cd_num is not None and ccol in cd_num.columns and "memory_bytes" in cd_num.columns:
+            sub2 = cd_num.nlargest(min(25, len(cd_num)), "memory_bytes")[[ccol, "memory_bytes"]].copy()
             if not sub2.empty:
                 st.divider()
-                _bar_chart(sub2, "column", "memory_bytes", "Largest columns by memory (bytes)", "Column")
+                _bar_chart(sub2, ccol, "memory_bytes", "Largest columns by memory (bytes)", "Column")
         dtype_df = sheets.get("All_Dtype_Summary")
         if dtype_df is None:
             dtype_df = sheets.get("Dtype_Summary")
@@ -593,12 +719,13 @@ def run_dashboard() -> None:
         '<p class="sub">Local path or upload · metrics refresh when the source changes.</p></div>',
         unsafe_allow_html=True,
     )
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Rows", f"{s['row_count']:,}")
     c2.metric("Columns", f"{s['column_count']:,}")
-    c3.metric("Total nulls", f"{s['total_nulls']:,}")
-    c4.metric("Null % (all cells)", f"{s['overall_null_pct']:.2f}%")
-    c5.metric("Memory (deep)", format_bytes(s["memory_usage_bytes"]))
+    c3.metric("Empty columns (100% null)", f"{int(s.get('empty_column_count', 0) or 0):,}")
+    c4.metric("Total null cells", f"{s['total_nulls']:,}")
+    c5.metric("Table null % (all cells)", f"{s['overall_null_pct']:.2f}%")
+    c6.metric("Memory (deep)", format_bytes(s["memory_usage_bytes"]))
 
     fd1, fd2, fd3, fd4 = st.columns(4)
     fd1.markdown(f"**Source** · `{s.get('source_path') or 'upload'}`")
@@ -608,7 +735,9 @@ def run_dashboard() -> None:
     fd4.markdown(f"**File size** · {format_bytes(fs) if fs is not None else 'N/A (upload)'}")
 
     col_df = pd.DataFrame([c.as_dict() for c in prof.columns])
+    col_df["empty_column_count"] = int(prof.empty_column_count)
     col_df["memory_human"] = col_df["memory_bytes"].map(format_bytes)
+    col_df = reorder_column_details_df(col_df)
     col_df_num = _coerce_numeric_columns(col_df, "null_pct", "memory_bytes")
 
     t1, t2, t3 = st.tabs(["Column metrics", "Charts", "Data preview"])
@@ -634,12 +763,12 @@ def run_dashboard() -> None:
             "paths_hidden": False,
             "input_path": str(s.get("source_path") or "upload"),
         }
-        profile_to_excel(prof, df, buf_path, sample_rows=sample_rows, report_context=live_ctx)
+        profile_to_excel(prof, buf_path, report_context=live_ctx)
         data = buf_path.read_bytes()
         st.download_button(
             label="Download Excel report",
             data=data,
-            file_name="dq_report.xlsx",
+            file_name=unique_report_basename("dq_report.xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     finally:

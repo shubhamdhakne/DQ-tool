@@ -11,6 +11,128 @@ import pandas as pd
 
 from dq_tool.profiler import DatasetProfile
 
+# Files_Overview column order (table_name immediately after source_path).
+_FILES_OVERVIEW_COL_ORDER = [
+    "source_path",
+    "table_name",
+    "file_type",
+    "file_extension",
+    "file_size_bytes",
+    "file_size_human",
+    "row_count",
+    "column_count",
+    "empty_column_count",
+    "total_null_cells",
+    "table_null_pct",
+    "memory_usage_bytes",
+    "memory_usage_human",
+]
+
+
+def append_profile_to_batch(
+    prof: DatasetProfile,
+    *,
+    display_source: str,
+    table_name: str,
+    summaries: list[dict[str, Any]],
+    all_column_rows: list[dict[str, Any]],
+    all_dtype_rows: list[dict[str, Any]],
+) -> None:
+    """Append one profile's summary, per-column rows (with table-level ``empty_column_count``), and dtype rows to batch lists."""
+    summary = prof.summary_dict()
+    summary["source_path"] = display_source
+    summary["table_name"] = table_name
+    summaries.append(summary)
+    empty_count = int(summary.get("empty_column_count") or 0)
+    for col in prof.columns:
+        row = col.as_dict()
+        row["source_path"] = display_source
+        row["table_name"] = table_name
+        row["empty_column_count"] = empty_count
+        all_column_rows.append(row)
+    dtype_counts = json.loads(prof.dtypes_json)
+    for dtype, count in dtype_counts.items():
+        all_dtype_rows.append(
+            {
+                "source_path": display_source,
+                "table_name": table_name,
+                "dtype": dtype,
+                "count": int(count),
+            }
+        )
+
+
+def _order_files_overview_columns(df: pd.DataFrame) -> pd.DataFrame:
+    front = [c for c in _FILES_OVERVIEW_COL_ORDER if c in df.columns]
+    rest = [c for c in df.columns if c not in front]
+    return df[front + rest] if front else df
+
+
+def reorder_column_details_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Column-metrics display order for dashboards and exports.
+    Puts ``empty_column_count`` immediately after ``dtype``; supports both raw profiler names and Excel renames.
+    """
+    cols = list(df.columns)
+    pref = [
+        "source_path",
+        "table_name",
+        "column_name",
+        "column",
+        "dtype",
+        "empty_column_count",
+        "column_non_null_count",
+        "non_null_count",
+        "column_null_count",
+        "null_count",
+        "column_null_pct",
+        "null_pct",
+        "unique_count",
+        "uniqueness_ratio",
+        "dq_flags",
+        "min",
+        "max",
+        "memory_bytes",
+        "memory_human",
+    ]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for p in pref:
+        if p in cols and p not in seen:
+            ordered.append(p)
+            seen.add(p)
+    for c in cols:
+        if c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return df[ordered]
+
+
+# Clearer Excel headers for null metrics (dataset vs column grain).
+_EXCEL_SUMMARY_METRIC_RENAMES = {
+    "total_nulls": "total_null_cells",
+    "overall_null_pct": "table_null_pct",
+}
+_EXCEL_COLUMN_RENAMES = {
+    "column": "column_name",
+    "null_count": "column_null_count",
+    "null_pct": "column_null_pct",
+    "non_null_count": "column_non_null_count",
+}
+
+
+def _summary_dict_for_excel(summary: dict[str, Any]) -> dict[str, Any]:
+    """Copy summary with renamed null keys for workbook readability."""
+    out: dict[str, Any] = {}
+    for k, v in summary.items():
+        out[_EXCEL_SUMMARY_METRIC_RENAMES.get(k, k)] = v
+    return out
+
+
+def _rename_column_metrics_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    renames = {k: v for k, v in _EXCEL_COLUMN_RENAMES.items() if k in df.columns}
+    return df.rename(columns=renames) if renames else df
+
 
 def logical_table_name(canonical_source: str | None, *, fallback_index: int | None = None) -> str:
     """
@@ -86,6 +208,12 @@ def _report_context_rows(meta: dict[str, Any]) -> list[tuple[str, Any]]:
 def _enrich_summary_row(summary: dict[str, Any]) -> dict[str, Any]:
     out = dict(summary)
     fs = out.get("file_size_bytes")
+    if fs is None and out.get("memory_usage_bytes") is not None:
+        try:
+            fs = int(out["memory_usage_bytes"])
+            out["file_size_bytes"] = fs
+        except (TypeError, ValueError):
+            fs = None
     try:
         out["file_size_human"] = format_bytes(int(fs)) if fs is not None else ""
     except (TypeError, ValueError):
@@ -107,42 +235,12 @@ def _write_combined_all_column_details_sheet(
     One sheet: top = per-file summary table, gap, then column-level metrics (all files).
     Returns 1-based Excel row number of the column-metrics header row (for dashboard parsing).
     """
-    fs_df = pd.DataFrame([_enrich_summary_row(s) for s in file_summaries])
-    preferred_fs_cols = [
-        "source_path",
-        "table_name",
-        "file_type",
-        "file_extension",
-        "file_size_bytes",
-        "file_size_human",
-        "row_count",
-        "column_count",
-        "total_nulls",
-        "overall_null_pct",
-        "memory_usage_bytes",
-        "memory_usage_human",
-    ]
-    fs_cols = [c for c in preferred_fs_cols if c in fs_df.columns]
+    fs_df = pd.DataFrame([_enrich_summary_row(_summary_dict_for_excel(s)) for s in file_summaries])
+    fs_cols = [c for c in _FILES_OVERVIEW_COL_ORDER if c in fs_df.columns]
     fs_df = fs_df[fs_cols + [c for c in fs_df.columns if c not in fs_cols]]
 
-    col_df = pd.DataFrame(all_column_rows)
-    preferred_col_order = [
-        "source_path",
-        "table_name",
-        "column",
-        "dtype",
-        "non_null_count",
-        "null_count",
-        "null_pct",
-        "unique_count",
-        "uniqueness_ratio",
-        "dq_flags",
-        "min",
-        "max",
-        "memory_bytes",
-    ]
-    front = [c for c in preferred_col_order if c in col_df.columns]
-    col_df = col_df[front + [c for c in col_df.columns if c not in front]]
+    col_df = _rename_column_metrics_for_excel(pd.DataFrame(all_column_rows))
+    col_df = reorder_column_details_df(col_df)
     if "memory_bytes" in col_df.columns:
         col_df["memory_human"] = col_df["memory_bytes"].map(format_bytes)
 
@@ -158,16 +256,16 @@ def _write_combined_all_column_details_sheet(
 
 def profile_to_excel(
     profile: DatasetProfile,
-    df: pd.DataFrame | None,
     output_path: str | Path,
-    sample_rows: int = 10,
     report_context: dict[str, Any] | None = None,
     display_source_override: str | None = None,
     canonical_source_for_table_name: str | None = None,
 ) -> Path:
     """
-    Create Excel report with sheets: Report_Context (optional), Overview, Column_Details,
-    Dtype_Summary, Sample_Data. Column_Details includes uniqueness_ratio and dq_flags.
+    Create Excel report with sheets: Report_Context, Overview, Column_Details, Dtype_Summary.
+    Column_Details uses column_name, column_null_count, column_null_pct (share of rows null
+    in that column), table_null_pct / total_null_cells, and empty_column_count (columns that
+    are 100% null when the table has at least one row).
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,34 +287,20 @@ def profile_to_excel(
         or "dataset"
     )
 
-    overview_pairs = _enrich_summary_row(summary)
+    overview_pairs = _enrich_summary_row(_summary_dict_for_excel(summary))
     overview_df = pd.DataFrame(list(overview_pairs.items()), columns=["metric", "value"])
 
     col_rows = [c.as_dict() for c in profile.columns]
     tn = summary["table_name"]
+    empty_count = int(summary.get("empty_column_count") or 0)
     for row in col_rows:
         row["source_path"] = summary.get("source_path") or ""
         row["table_name"] = tn
+        row["empty_column_count"] = empty_count
 
-    columns_df = pd.DataFrame(col_rows)
-    preferred = [
-        "source_path",
-        "table_name",
-        "column",
-        "dtype",
-        "non_null_count",
-        "null_count",
-        "null_pct",
-        "unique_count",
-        "uniqueness_ratio",
-        "dq_flags",
-        "min",
-        "max",
-        "memory_bytes",
-    ]
-    front = [c for c in preferred if c in columns_df.columns]
-    columns_df = columns_df[front + [c for c in columns_df.columns if c not in front]]
+    columns_df = _rename_column_metrics_for_excel(pd.DataFrame(col_rows))
     columns_df["memory_human"] = columns_df["memory_bytes"].map(format_bytes)
+    columns_df = reorder_column_details_df(columns_df)
 
     dtype_counts = json.loads(profile.dtypes_json)
     dtype_summary = pd.Series(dtype_counts, name="count").rename_axis("dtype").reset_index()
@@ -229,71 +313,14 @@ def profile_to_excel(
         overview_df.to_excel(writer, sheet_name="Overview", index=False)
         columns_df.to_excel(writer, sheet_name="Column_Details", index=False)
         dtype_summary.to_excel(writer, sheet_name="Dtype_Summary", index=False)
-        if df is not None and sample_rows > 0:
-            head = df.head(sample_rows)
-            head.to_excel(writer, sheet_name="Sample_Data", index=True)
 
     return output_path
-
-
-def build_batch_sample_data_long(samples: list[pd.DataFrame]) -> pd.DataFrame | None:
-    """
-    Batch reports: one row per cell for the first N rows of each file.
-    Readable when files have different columns (avoids a single wide, sparse concat).
-    """
-    if not samples:
-        return None
-    rows: list[dict[str, Any]] = []
-    source_keys = ("__dq_source_path", "__dq_source_file", "__dq_source")
-    for sdf in samples:
-        if sdf is None or sdf.empty:
-            continue
-        src = ""
-        for k in source_keys:
-            if k in sdf.columns:
-                v = sdf.iloc[0][k]
-                src = "" if pd.isna(v) else str(v)
-                break
-        tn = ""
-        if "__dq_table_name" in sdf.columns:
-            tv = sdf.iloc[0]["__dq_table_name"]
-            tn = "" if pd.isna(tv) else str(tv)
-        data_cols = [c for c in sdf.columns if not str(c).startswith("__dq_")]
-        for ridx in range(len(sdf)):
-            row = sdf.iloc[ridx]
-            for col in data_cols:
-                val = row[col]
-                if pd.isna(val):
-                    val_s = ""
-                elif hasattr(val, "isoformat"):
-                    try:
-                        val_s = val.isoformat()  # type: ignore[no-untyped-call]
-                    except (OSError, ValueError, TypeError):
-                        val_s = str(val)
-                else:
-                    val_s = str(val)
-                rows.append(
-                    {
-                        "table_name": tn,
-                        "source_path": src,
-                        "sample_row": ridx + 1,
-                        "column_name": col,
-                        "cell_value": val_s,
-                    }
-                )
-    if not rows:
-        return None
-    return pd.DataFrame(
-        rows,
-        columns=["table_name", "source_path", "sample_row", "column_name", "cell_value"],
-    )
 
 
 def write_batch_workbook(
     summaries: list[dict[str, Any]],
     all_column_rows: list[dict[str, Any]],
     all_dtype_rows: list[dict[str, Any]],
-    samples_concat: pd.DataFrame | None,
     output_path: str | Path,
     report_context: dict[str, Any],
 ) -> Path:
@@ -305,14 +332,13 @@ def write_batch_workbook(
     meta.setdefault("generated_utc", _utc_now_iso())
     meta["file_count"] = len(summaries)
 
-    fs_overview = pd.DataFrame([_enrich_summary_row(s) for s in summaries])
+    fs_overview = pd.DataFrame([_enrich_summary_row(_summary_dict_for_excel(s)) for s in summaries])
+    fs_overview = _order_files_overview_columns(fs_overview)
     dtype_df = pd.DataFrame(all_dtype_rows)
 
     f = len(summaries)
     meta["column_details_header_row"] = f + 3
     meta["column_details_layout"] = "file_summary_then_columns"
-    if samples_concat is not None and not samples_concat.empty:
-        meta["sample_data_layout"] = "long_tidy"
     ctx_df = pd.DataFrame(_report_context_rows(meta), columns=["metric", "value"])
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -320,7 +346,5 @@ def write_batch_workbook(
         fs_overview.to_excel(writer, sheet_name="Files_Overview", index=False)
         _write_combined_all_column_details_sheet(writer, summaries, all_column_rows)
         dtype_df.to_excel(writer, sheet_name="All_Dtype_Summary", index=False)
-        if samples_concat is not None and not samples_concat.empty:
-            samples_concat.to_excel(writer, sheet_name="Sample_Data", index=False)
 
     return output_path
