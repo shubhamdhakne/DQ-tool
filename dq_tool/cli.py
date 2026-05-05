@@ -514,7 +514,7 @@ def main() -> None:
         "--fabric-profile",
         default="",
         metavar="PROFILE",
-        help="Microsoft Fabric SQL: credential JSON under credentials/fabric/<PROFILE>.json; profiles all BASE TABLE in --fabric-schema.",
+        help="Microsoft Fabric SQL: credential JSON under credentials/fabric/<PROFILE>.json; scans all BASE TABLE in --fabric-schema with full table reads (all rows) by default.",
     )
     parser.add_argument(
         "--fabric-schema",
@@ -531,9 +531,9 @@ def main() -> None:
     parser.add_argument(
         "--fabric-max-rows",
         type=int,
-        default=50_000,
+        default=0,
         metavar="N",
-        help="Max rows per table via SELECT TOP (default 50000).",
+        help="Rows per table: 0 = full table SELECT * (default); N > 0 uses SELECT TOP (N).",
     )
     parser.add_argument(
         "--fabric-max-tables",
@@ -644,7 +644,9 @@ def main() -> None:
             schema=args.fabric_schema.strip(),
             database=args.fabric_database.strip(),
             hide_paths=args.hide_paths,
-            max_rows_per_table=int(args.fabric_max_rows),
+            max_rows_per_table=(
+                None if int(args.fabric_max_rows) <= 0 else int(args.fabric_max_rows)
+            ),
             max_tables=int(args.fabric_max_tables),
         )
         print(f"Fabric SQL batch report written: {out.resolve()}")

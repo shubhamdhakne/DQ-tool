@@ -1,4 +1,4 @@
-"""Microsoft Fabric SQL: list tables in a schema and batch-profile via in-memory DataFrames."""
+"""Microsoft Fabric SQL: list tables in a schema and profile full source data (all rows per table by default)."""
 
 from __future__ import annotations
 
@@ -47,12 +47,14 @@ def run_fabric_schema_pipeline(
     schema: str = "BRONZE",
     database: str = "",
     hide_paths: bool = False,
-    max_rows_per_table: int = 50_000,
+    max_rows_per_table: int | None = None,
     max_tables: int = 0,
 ) -> Path:
     """
     Connect to Fabric SQL using ``credentials/fabric/<profile>.json``,
-    list ``BASE TABLE`` in ``schema``, profile each with ``SELECT TOP (n) *``.
+    list ``BASE TABLE`` in ``schema``, profile each with ``SELECT *`` (full table).
+
+    ``max_rows_per_table``: if a positive integer, use ``SELECT TOP (n) *`` instead.
 
     ``max_tables`` 0 means no limit.
 
@@ -106,12 +108,18 @@ def run_fabric_schema_pipeline(
             names = names[: int(max_tables)]
 
         sch = _sql_bracket_ident(schema_clean)
-        cap = max(1, min(int(max_rows_per_table), 2_000_000))
+        row_cap: int | None = None
+        if max_rows_per_table is not None and int(max_rows_per_table) > 0:
+            row_cap = int(max_rows_per_table)
 
         success_count = 0
         for tname in names:
             tq = _sql_bracket_ident(tname)
-            sql = f"SELECT TOP ({cap}) * FROM {sch}.{tq}"
+            sql = (
+                f"SELECT TOP ({row_cap}) * FROM {sch}.{tq}"
+                if row_cap is not None
+                else f"SELECT * FROM {sch}.{tq}"
+            )
             try:
                 df = pd.read_sql(sql, conn)
             except (ValueError, TypeError, OSError) as exc:
@@ -153,7 +161,7 @@ def run_fabric_schema_pipeline(
                 "fabric_schema": schema_clean,
                 "credential_profile": fabric_profile.strip(),
                 "fabric_table_count": len(summaries),
-                "fabric_max_rows_per_table": cap,
+                "fabric_max_rows_per_table": row_cap if row_cap is not None else "all",
             },
         )
     finally:
